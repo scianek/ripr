@@ -1,0 +1,20 @@
+[package]
+name = "ripr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures = "0.3.31"
+reqwest = { version = "0.12.23", features = [
+    "charset",
+    "gzip",
+    "brotli",
+    "deflate",
+] }
+sanitize-filename = "0.6.0"
+scraper = "0.24.0"
+thiserror = "2.0.17"
+url = "2.5.7"
+
+[dev-dependencies]
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
