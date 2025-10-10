@@ -3,6 +3,7 @@
 use crate::client::Client;
 use crate::downloader::Downloader;
 use crate::error::Result;
+use crate::selection_chain::{Extractor, SelectionChain};
 use futures::{StreamExt, stream};
 use reqwest::Url;
 
@@ -33,13 +34,19 @@ impl ScraperPipeline {
         Ok(self)
     }
 
-    /// Move to selection stage.
-    pub fn select(self, selector: &str) -> Result<SelectorPipeline> {
-        let selector = scraper::Selector::parse(selector)
-            .map_err(|e| crate::error::Error::InvalidSelector(format!("{:?}", e)))?;
+    /// Select the first element matching the selector across all pages.
+    pub fn select_one(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
             scraper: self,
-            selector,
+            selection_chain: SelectionChain::new().select_one(selector)?,
+        })
+    }
+
+    /// Select all elements matching the selector across all pages.
+    pub fn select_all(self, selector: &str) -> Result<SelectorPipeline> {
+        Ok(SelectorPipeline {
+            scraper: self,
+            selection_chain: SelectionChain::new().select_one(selector)?,
         })
     }
 }
@@ -47,7 +54,7 @@ impl ScraperPipeline {
 /// Pipeline state after selecting elements.
 pub struct SelectorPipeline {
     scraper: ScraperPipeline,
-    selector: scraper::Selector,
+    selection_chain: SelectionChain,
 }
 
 impl SelectorPipeline {
@@ -55,7 +62,7 @@ impl SelectorPipeline {
     pub fn attr(self, attr: &str) -> ExtractorPipeline {
         ExtractorPipeline {
             scraper: self.scraper,
-            selector: self.selector,
+            selection_chain: self.selection_chain,
             extractor: Extractor::Attr(attr.to_string()),
         }
     }
@@ -64,7 +71,7 @@ impl SelectorPipeline {
     pub fn text(self) -> ExtractorPipeline {
         ExtractorPipeline {
             scraper: self.scraper,
-            selector: self.selector,
+            selection_chain: self.selection_chain,
             extractor: Extractor::Text,
         }
     }
@@ -73,9 +80,25 @@ impl SelectorPipeline {
     pub fn html(self) -> ExtractorPipeline {
         ExtractorPipeline {
             scraper: self.scraper,
-            selector: self.selector,
+            selection_chain: self.selection_chain,
             extractor: Extractor::Html,
         }
+    }
+
+    /// Narrow the selection further by selecting the first matching child.
+    pub fn select_one(self, selector: &str) -> Result<Self> {
+        Ok(Self {
+            scraper: self.scraper,
+            selection_chain: self.selection_chain.select_one(selector)?,
+        })
+    }
+
+    /// Narrow the selection further by selecting all matching children.
+    pub fn select_all(self, selector: &str) -> Result<Self> {
+        Ok(Self {
+            scraper: self.scraper,
+            selection_chain: self.selection_chain.select_all(selector)?,
+        })
     }
 }
 
@@ -89,7 +112,7 @@ pub enum Extractor {
 /// Pipeline for extracting string data from selected elements.
 pub struct ExtractorPipeline {
     scraper: ScraperPipeline,
-    selector: scraper::Selector,
+    selection_chain: SelectionChain,
     extractor: Extractor,
 }
 
@@ -98,21 +121,7 @@ impl ExtractorPipeline {
     pub async fn collect(self) -> Result<Vec<String>> {
         let text = self.scraper.client.fetch_text(&self.scraper.url).await?;
         let html = scraper::Html::parse_document(&text);
-
-        let values = match self.extractor {
-            Extractor::Attr(attr) => html
-                .select(&self.selector)
-                .filter_map(|el| el.attr(&attr))
-                .map(String::from)
-                .collect(),
-            Extractor::Text => html
-                .select(&self.selector)
-                .map(|el| el.text().collect())
-                .collect(),
-            Extractor::Html => html.select(&self.selector).map(|el| el.html()).collect(),
-        };
-
-        Ok(values)
+        Ok(self.selection_chain.extract(&html, &self.extractor))
     }
 
     /// Download extracted URLs to a directory.

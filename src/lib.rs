@@ -23,6 +23,7 @@ pub mod downloader;
 pub mod error;
 pub(crate) mod filename;
 pub mod pipeline;
+pub mod selection_chain;
 
 pub mod prelude {
     pub use crate::client::Client;
