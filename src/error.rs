@@ -24,6 +24,10 @@ pub enum Error {
     /// Error occurred while parsing a URL.
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+
+    /// Error occurred while validating pagination parameters.
+    #[error("Pagination error: {0}")]
+    PaginationError(String),
 }
 
 /// A specialized Result type for ripr.
