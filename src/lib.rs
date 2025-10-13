@@ -20,6 +20,7 @@
 
 pub mod client;
 pub mod downloader;
+pub mod element;
 pub mod error;
 pub(crate) mod filename;
 pub mod pipeline;
@@ -28,9 +29,11 @@ pub mod selection_chain;
 pub mod prelude {
     pub use crate::client::Client;
     pub use crate::downloader::Downloader;
-    pub use crate::pipeline::scrape;
+    pub use crate::element::Element;
+    pub use crate::pipeline::{Extract, scrape};
 }
 
 pub use crate::client::Client;
 pub use crate::downloader::Downloader;
+pub use crate::element::Element;
 pub use crate::pipeline::scrape;

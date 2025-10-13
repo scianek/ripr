@@ -1,6 +1,9 @@
 //! Extract data from HTML pages and elements
 
-use crate::error::{Error, Result};
+use crate::{
+    Element,
+    error::{Error, Result},
+};
 
 #[derive(Debug, Clone)]
 enum SelectMode {
@@ -33,18 +36,18 @@ impl SelectionChain {
     }
 
     /// Execute the selection tree against an HTML document
-    pub fn select<'a>(&self, html: &'a scraper::Html) -> Vec<scraper::ElementRef<'a>> {
-        let mut elements = vec![html.root_element()];
+    pub fn select<'a>(&self, html: &'a scraper::Html) -> Vec<Element<'a>> {
+        let mut elements = vec![Element::new(html.root_element())];
 
         for level in &self.levels {
             elements = match level {
                 SelectMode::First(selector) => elements
                     .into_iter()
-                    .filter_map(|el| el.select(selector).next())
+                    .filter_map(|el| el.select_one_parsed(selector))
                     .collect(),
                 SelectMode::All(selector) => elements
                     .into_iter()
-                    .flat_map(|el| el.select(selector))
+                    .flat_map(|el| el.select_all_parsed(selector))
                     .collect(),
             };
         }
@@ -59,13 +62,9 @@ impl SelectionChain {
         match extractor {
             Extractor::Attr(attr) => elements
                 .into_iter()
-                .filter_map(|el| el.value().attr(attr))
-                .map(String::from)
+                .filter_map(|el| el.attr(attr).map(String::from))
                 .collect(),
-            Extractor::Text => elements
-                .into_iter()
-                .map(|el| el.text().collect::<String>())
-                .collect(),
+            Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
             Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
         }
     }

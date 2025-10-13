@@ -2,6 +2,7 @@
 
 use crate::client::Client;
 use crate::downloader::Downloader;
+use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::selection_chain::{Extractor, SelectionChain};
 use futures::{StreamExt, stream};
@@ -172,6 +173,19 @@ impl SelectorPipeline {
         }
     }
 
+    /// Extract structured data from each matched element using a custom type.
+    ///
+    /// The type must implement [`Extract`], either manually or via `#[derive(Extract)]`.
+    pub fn extract<T: Extract>(self) -> CustomExtractionPipeline<T> {
+        CustomExtractionPipeline::<T> {
+            url: self.url,
+            client: self.client,
+            pagination: self.pagination,
+            selection_chain: self.selection_chain,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
     /// Narrow the selection further by selecting the first matching child.
     pub fn select_one(self, selector: &str) -> Result<Self> {
         Ok(Self {
@@ -279,26 +293,116 @@ impl ExtractorPipeline {
     }
 
     async fn fetch_paginated(&self) -> Result<Vec<scraper::Html>> {
-        use futures::stream::{self, StreamExt, TryStreamExt};
+        fetch_pages(&self.client, &self.url, self.pagination.as_ref()).await
+    }
+}
 
-        let page_urls: Vec<_> = if let Some(ref range) = self.pagination {
-            range
-                .clone()
-                .map(|page| self.url.replace("{page}", &page.to_string()))
-                .collect()
-        } else {
-            vec![self.url.clone()]
-        };
+/// Pipeline for extracting typed data from selected elements.
+pub struct CustomExtractionPipeline<T: Extract> {
+    url: String,
+    client: Client,
+    pagination: Option<Range<usize>>,
+    selection_chain: SelectionChain,
+    _marker: std::marker::PhantomData<T>,
+}
 
-        let htmls = stream::iter(page_urls)
-            .map(|url| async move {
-                let text = self.client.fetch_text(&url).await;
-                text.map(|t| scraper::Html::parse_document(&t))
+impl<T: Extract> CustomExtractionPipeline<T> {
+    pub async fn collect(self) -> Result<Vec<T>> {
+        let htmls = self.fetch_paginated().await?;
+        let mut results = Vec::new();
+        for html in htmls {
+            let selections = self.selection_chain.select(&html);
+            let transformed = selections
+                .into_iter()
+                .filter_map(T::extract)
+                .collect::<Vec<_>>();
+            results.extend(transformed);
+        }
+        Ok(results)
+    }
+
+    async fn fetch_paginated(&self) -> Result<Vec<scraper::Html>> {
+        fetch_pages(&self.client, &self.url, self.pagination.as_ref()).await
+    }
+
+    /// Download extracted items to a directory using a mapping function
+    pub async fn download_to<F>(self, dir: &str, map_fn: F) -> Result<Vec<Result<String>>>
+    where
+        F: Fn((usize, &T)) -> String,
+    {
+        let client = self.client.clone();
+        let items = self.collect().await?;
+        let urls: Vec<String> = items.iter().enumerate().map(map_fn).collect();
+        let url_refs: Vec<&str> = urls.iter().map(String::as_str).collect();
+
+        let downloader = Downloader::new(client);
+        Ok(stream::iter(url_refs)
+            .map(|url| {
+                let downloader = downloader.clone();
+                let filename = url.split('/').last().unwrap_or("downloaded_file");
+                let path = format!("{}/{}", dir, filename);
+                async move { downloader.download(url, &path).await }
             })
             .buffer_unordered(10)
-            .try_collect()
-            .await?;
-
-        Ok(htmls)
+            .collect()
+            .await)
     }
+
+    pub async fn download_with<F>(self, map_fn: F) -> Result<Vec<Result<String>>>
+    where
+        F: Fn((usize, &T)) -> Option<(String, String)>,
+    {
+        let client = self.client.clone();
+        let items = self.collect().await?;
+        let jobs = items.iter().enumerate().map(map_fn).collect::<Vec<_>>();
+        let job_refs: Vec<(&str, &str)> = jobs
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .map(|(url, path)| (url.as_str(), path.as_str()))
+            .collect();
+
+        let downloader = Downloader::new(client);
+        Ok(stream::iter(job_refs)
+            .map(|(url, path)| {
+                let downloader = downloader.clone();
+                async move { downloader.download(url, path).await }
+            })
+            .buffer_unordered(10)
+            .collect()
+            .await)
+    }
+}
+
+/// Shared helper for fetching pages
+async fn fetch_pages(
+    client: &Client,
+    url: &str,
+    pagination: Option<&Range<usize>>,
+) -> Result<Vec<scraper::Html>> {
+    use futures::stream::{self, StreamExt, TryStreamExt};
+
+    let page_urls: Vec<_> = if let Some(range) = pagination {
+        range
+            .clone()
+            .map(|page| url.replace("{page}", &page.to_string()))
+            .collect()
+    } else {
+        vec![url.to_owned()]
+    };
+
+    let htmls = stream::iter(page_urls)
+        .map(|url| async move {
+            let text = client.fetch_text(&url).await;
+            text.map(|t| scraper::Html::parse_document(&t))
+        })
+        .buffer_unordered(10)
+        .try_collect()
+        .await?;
+
+    Ok(htmls)
+}
+
+pub trait Extract: Sized {
+    /// Extract a value from the given element, returning `None` if extraction fails.
+    fn extract(selectable: Element) -> Option<Self>;
 }
