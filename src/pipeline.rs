@@ -144,6 +144,7 @@ impl SelectorPipeline {
             pagination: self.pagination,
             selection_chain: self.selection_chain,
             extractor: Extractor::Attr(attr.to_string()),
+            transforms: Vec::new(),
         }
     }
 
@@ -155,6 +156,7 @@ impl SelectorPipeline {
             pagination: self.pagination,
             selection_chain: self.selection_chain,
             extractor: Extractor::Text,
+            transforms: Vec::new(),
         }
     }
 
@@ -166,6 +168,7 @@ impl SelectorPipeline {
             pagination: self.pagination,
             selection_chain: self.selection_chain,
             extractor: Extractor::Html,
+            transforms: Vec::new(),
         }
     }
 
@@ -204,6 +207,7 @@ pub struct ExtractorPipeline {
     pagination: Option<Range<usize>>,
     selection_chain: SelectionChain,
     extractor: Extractor,
+    transforms: Vec<Box<dyn Fn(String) -> String + Send + Sync>>,
 }
 
 impl ExtractorPipeline {
@@ -212,7 +216,12 @@ impl ExtractorPipeline {
         let htmls = self.fetch_paginated().await?;
         let mut results = Vec::new();
         for html in htmls {
-            results.extend(self.selection_chain.extract(&html, &self.extractor));
+            let extracted = self.selection_chain.extract(&html, &self.extractor);
+            let transformed = extracted
+                .into_iter()
+                .map(|s| self.transforms.iter().fold(s, |acc, func| func(acc)))
+                .collect::<Vec<_>>();
+            results.extend(transformed);
         }
         Ok(results)
     }
@@ -238,6 +247,14 @@ impl ExtractorPipeline {
     }
 
     /// Resolves relative URLs against the base URL.
+    pub fn transform<F>(mut self, func: F) -> Self
+    where
+        F: Fn(String) -> String + Send + Sync + 'static,
+    {
+        self.transforms.push(Box::new(func));
+        self
+    }
+
     async fn extract_urls(self) -> Result<Vec<String>> {
         // Remove {page} placeholder for base URL resolution
         let base_url_str = self.url.replace("{page}", "1");
