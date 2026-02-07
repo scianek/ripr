@@ -36,4 +36,4 @@ pub mod prelude {
 pub use crate::client::Client;
 pub use crate::downloader::Downloader;
 pub use crate::element::Element;
-pub use crate::pipeline::scrape;
+pub use crate::pipeline::{Extract, scrape};
