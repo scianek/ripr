@@ -1,6 +1,6 @@
 //! Fluent pipeline API for web scraping.
 
-use crate::client::Client;
+use crate::client::{Client, ClientBuilder};
 use crate::downloader::Downloader;
 use crate::element::Element;
 use crate::error::{Error, Result};
@@ -13,26 +13,26 @@ use std::ops::{Bound, Range, RangeBounds};
 pub fn scrape(url: impl Into<String>) -> ScraperPipeline {
     ScraperPipeline {
         url: url.into(),
-        client: Client::new(),
+        client_builder: Client::builder(),
     }
 }
 
 /// Pipeline for scraping a single URL, with optional pagination and headers.
 pub struct ScraperPipeline {
     url: String,
-    client: Client,
+    client_builder: ClientBuilder,
 }
 
 impl ScraperPipeline {
     /// Load headers from a file.
     pub fn headers_from(mut self, path: &str) -> Result<Self> {
-        self.client = self.client.with_headers_from(path)?;
+        self.client_builder = self.client_builder.headers_from(path)?;
         Ok(self)
     }
 
     /// Add a single header.
     pub fn header(mut self, name: &str, value: &str) -> Result<Self> {
-        self.client = self.client.with_header(name, value)?;
+        self.client_builder = self.client_builder.header(name, value)?;
         Ok(self)
     }
 
@@ -75,7 +75,7 @@ impl ScraperPipeline {
 
         Ok(PaginatedScraper {
             url: self.url,
-            client: self.client,
+            client_builder: self.client_builder,
             pagination: start..end,
         })
     }
@@ -84,7 +84,7 @@ impl ScraperPipeline {
     pub fn select_one(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
             url: self.url,
-            client: self.client,
+            client: self.client_builder.build()?,
             pagination: None,
             selection_chain: SelectionChain::new().select_one(selector)?,
         })
@@ -94,7 +94,7 @@ impl ScraperPipeline {
     pub fn select_all(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
             url: self.url,
-            client: self.client,
+            client: self.client_builder.build()?,
             pagination: None,
             selection_chain: SelectionChain::new().select_all(selector)?,
         })
@@ -104,7 +104,7 @@ impl ScraperPipeline {
 /// Scraper with pagination configured
 pub struct PaginatedScraper {
     url: String,
-    client: Client,
+    client_builder: ClientBuilder,
     pagination: Range<usize>,
 }
 
@@ -112,7 +112,7 @@ impl PaginatedScraper {
     pub fn select_one(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
             url: self.url,
-            client: self.client,
+            client: self.client_builder.build()?,
             pagination: Some(self.pagination),
             selection_chain: SelectionChain::new().select_one(selector)?,
         })
@@ -121,7 +121,7 @@ impl PaginatedScraper {
     pub fn select_all(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
             url: self.url,
-            client: self.client,
+            client: self.client_builder.build()?,
             pagination: Some(self.pagination),
             selection_chain: SelectionChain::new().select_all(selector)?,
         })
