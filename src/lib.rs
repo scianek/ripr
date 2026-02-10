@@ -9,11 +9,18 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     ripr::scrape("https://example.com")
-//!         .select("img")?
+//!     let images = scrape("https://example.com?page={page}")
+//!         .pages(1..=20)?
+//!         .select_all("img")?
 //!         .attr("src")
-//!         .download_to("images")
+//!         .collect()
 //!         .await?;
+//!
+//!     download(&images)
+//!         .to_dir("images")
+//!         .run()
+//!         .await;
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -23,17 +30,19 @@ pub mod downloader;
 pub mod element;
 pub mod error;
 pub(crate) mod filename;
-pub mod pipeline;
+pub mod pipelines;
 pub mod selection_chain;
 
 pub mod prelude {
     pub use crate::client::Client;
     pub use crate::downloader::Downloader;
     pub use crate::element::Element;
-    pub use crate::pipeline::{Extract, scrape};
+    pub use crate::pipelines::download::download;
+    pub use crate::pipelines::scrape::{Extract, scrape};
 }
 
 pub use crate::client::Client;
 pub use crate::downloader::Downloader;
 pub use crate::element::Element;
-pub use crate::pipeline::{Extract, scrape};
+pub use crate::pipelines::download::download;
+pub use crate::pipelines::scrape::{Extract, scrape};
