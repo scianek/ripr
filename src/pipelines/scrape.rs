@@ -261,23 +261,61 @@ pub struct ExtractorPipeline {
 }
 
 impl ExtractorPipeline {
-    /// Collect extracted values.
+    /// Collect results, failing on first error (default behavior).
     pub async fn collect(self) -> Result<Vec<String>> {
         let htmls = fetch_all(&self.client, &self.urls).await?;
         let mut results = Vec::new();
         for html in htmls {
-            let extracted = html
-                .select_chain(&self.selection_chain)
-                .into_iter()
-                .map(|el| match &self.extractor {
-                    Extractor::Attr(attr) => el.attr(attr).unwrap_or_default().to_string(),
-                    Extractor::Text => el.text(),
-                    Extractor::Html => el.html(),
-                })
-                .collect::<Vec<_>>();
+            let elements = html.select_chain(&self.selection_chain);
+            let extracted: Vec<String> = match &self.extractor {
+                Extractor::Attr(attr) => elements
+                    .into_iter()
+                    .filter_map(|el| el.attr(attr).map(String::from))
+                    .collect(),
+                Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
+                Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
+            };
             results.extend(extracted);
         }
         Ok(results)
+    }
+
+    /// Collect successful results, logging and skipping failures.
+    pub async fn collect_ok(self) -> Vec<String> {
+        let htmls = fetch_all_tolerant(&self.client, &self.urls).await;
+        let mut results = Vec::new();
+        for html in htmls {
+            let elements = html.select_chain(&self.selection_chain);
+            let extracted: Vec<String> = match &self.extractor {
+                Extractor::Attr(attr) => elements
+                    .into_iter()
+                    .filter_map(|el| el.attr(attr).map(String::from))
+                    .collect(),
+                Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
+                Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
+            };
+            results.extend(extracted);
+        }
+        results
+    }
+
+    /// Collect with detailed error information.
+    pub async fn collect_with_errors(self) -> (Vec<String>, Vec<FetchError>) {
+        let (htmls, errors) = fetch_all_with_errors(&self.client, &self.urls).await;
+        let mut results = Vec::new();
+        for html in htmls {
+            let elements = html.select_chain(&self.selection_chain);
+            let extracted: Vec<String> = match &self.extractor {
+                Extractor::Attr(attr) => elements
+                    .into_iter()
+                    .filter_map(|el| el.attr(attr).map(String::from))
+                    .collect(),
+                Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
+                Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
+            };
+            results.extend(extracted);
+        }
+        (results, errors)
     }
 }
 
@@ -290,6 +328,7 @@ pub struct CustomExtractionPipeline<T: Extract> {
 }
 
 impl<T: Extract> CustomExtractionPipeline<T> {
+    /// Collect results, failing on first error.
     pub async fn collect(self) -> Result<Vec<T>> {
         let htmls = fetch_all(&self.client, &self.urls).await?;
         let mut results = Vec::new();
@@ -303,23 +342,107 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         }
         Ok(results)
     }
+
+    /// Collect successful results, skipping failures silently.
+    pub async fn collect_ok(self) -> Vec<T> {
+        let htmls = fetch_all_tolerant(&self.client, &self.urls).await;
+        let mut results = Vec::new();
+        for html in htmls {
+            let selections = html.select_chain(&self.selection_chain);
+            let transformed = selections
+                .into_iter()
+                .filter_map(T::extract)
+                .collect::<Vec<_>>();
+            results.extend(transformed);
+        }
+        results
+    }
+
+    /// Collect with detailed error information.
+    pub async fn collect_with_errors(self) -> (Vec<T>, Vec<FetchError>) {
+        let (htmls, errors) = fetch_all_with_errors(&self.client, &self.urls).await;
+        let mut results = Vec::new();
+        for html in htmls {
+            let selections = html.select_chain(&self.selection_chain);
+            let transformed = selections
+                .into_iter()
+                .filter_map(T::extract)
+                .collect::<Vec<_>>();
+            results.extend(transformed);
+        }
+        (results, errors)
+    }
 }
 
-/// Shared helper for fetching pages.
+/// Error information for failed fetches.
+#[derive(Debug)]
+pub struct FetchError {
+    /// The URL that failed to fetch.
+    pub url: String,
+    /// The underlying error.
+    pub error: Error,
+}
+
+/// Fetch all URLs, failing on first error.
 async fn fetch_all(client: &Client, urls: &[String]) -> Result<Vec<Html>> {
     use futures::stream::{self, StreamExt, TryStreamExt};
 
     let htmls = stream::iter(urls)
-        .map(|url| async move {
-            let text = client.fetch_text(&url).await;
-            text.map(|t| scraper::Html::parse_document(&t))
-                .map(Html::new)
-        })
+        .map(|url| async move { client.fetch_html(url).await })
         .buffered(10)
         .try_collect()
         .await?;
 
     Ok(htmls)
+}
+
+/// Fetch all URLs, logging and skipping failures.
+/// Fetch all URLs, skipping failures silently.
+async fn fetch_all_tolerant(client: &Client, urls: &[String]) -> Vec<Html> {
+    use futures::stream::{self, StreamExt};
+
+    stream::iter(urls)
+        .map(|url| async move {
+            client.fetch_html(url).await.ok() // Convert to Option, discard error
+        })
+        .buffered(10)
+        .filter_map(|result| async { result })
+        .collect()
+        .await
+}
+
+/// Fetch all URLs, collecting both successes and errors.
+async fn fetch_all_with_errors(client: &Client, urls: &[String]) -> (Vec<Html>, Vec<FetchError>) {
+    use futures::stream::{self, StreamExt};
+
+    let results: Vec<_> = stream::iter(urls)
+        .map(|url| {
+            let url = url.clone();
+            async move {
+                match client.fetch_html(&url).await {
+                    Ok(html) => Ok(html),
+                    Err(e) => Err(FetchError {
+                        url: url.clone(),
+                        error: e,
+                    }),
+                }
+            }
+        })
+        .buffered(10)
+        .collect()
+        .await;
+
+    let mut htmls = Vec::new();
+    let mut errors = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(html) => htmls.push(html),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    (htmls, errors)
 }
 
 pub trait Extract: Sized {
