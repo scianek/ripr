@@ -5,9 +5,11 @@ use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::html::Html;
 use crate::selection_chain::SelectionChain;
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Bound, RangeBounds};
 
-/// Entry point for scraping.
+/// Entry point for scraping a single URL.
+///
+/// Use [`scrape_many`] to scrape multiple independent URLs.
 pub fn scrape(url: impl Into<String>) -> ScraperPipeline {
     ScraperPipeline {
         url: url.into(),
@@ -35,7 +37,7 @@ impl ScraperPipeline {
     }
 
     /// Configure pagination by specifying start and end page numbers.
-    pub fn pages<R>(self, range: R) -> Result<PaginatedScraper>
+    pub fn pages<R>(self, range: R) -> Result<Paginated>
     where
         R: RangeBounds<usize>,
     {
@@ -71,19 +73,19 @@ impl ScraperPipeline {
             ));
         }
 
-        Ok(PaginatedScraper {
-            url: self.url,
+        Ok(Paginated {
+            urls: (start..end)
+                .map(|page| self.url.replace("{page}", &page.to_string()))
+                .collect(),
             client_builder: self.client_builder,
-            pagination: start..end,
         })
     }
 
     /// Select the first element matching the selector across all pages.
     pub fn select_one(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
-            url: self.url,
+            urls: vec![self.url],
             client: self.client_builder.build()?,
-            pagination: None,
             selection_chain: SelectionChain::new().select_one(selector)?,
         })
     }
@@ -91,36 +93,86 @@ impl ScraperPipeline {
     /// Select all elements matching the selector across all pages.
     pub fn select_all(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
-            url: self.url,
+            urls: vec![self.url],
             client: self.client_builder.build()?,
-            pagination: None,
+            selection_chain: SelectionChain::new().select_all(selector)?,
+        })
+    }
+}
+
+/// Entry point for scraping multiple independent URLs.
+///
+/// All URLs are fetched concurrently and results are collected in order.
+pub fn scrape_many<I, S>(urls: I) -> MultiScraper
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    MultiScraper {
+        urls: urls.into_iter().map(Into::into).collect(),
+        client_builder: Client::builder(),
+    }
+}
+
+/// Scraper for multiple independent URLs.
+pub struct MultiScraper {
+    urls: Vec<String>,
+    client_builder: ClientBuilder,
+}
+
+impl MultiScraper {
+    /// Load headers from a file.
+    pub fn headers_from(mut self, path: &str) -> Result<Self> {
+        self.client_builder = self.client_builder.headers_from(path)?;
+        Ok(self)
+    }
+
+    /// Add a single header.
+    pub fn header(mut self, name: &str, value: &str) -> Result<Self> {
+        self.client_builder = self.client_builder.header(name, value)?;
+        Ok(self)
+    }
+
+    /// Select the first element matching the selector across all URLs.
+    pub fn select_one(self, selector: &str) -> Result<SelectorPipeline> {
+        Ok(SelectorPipeline {
+            urls: self.urls,
+            client: self.client_builder.build()?,
+            selection_chain: SelectionChain::new().select_one(selector)?,
+        })
+    }
+
+    /// Select all elements matching the selector across all URLs.
+    pub fn select_all(self, selector: &str) -> Result<SelectorPipeline> {
+        Ok(SelectorPipeline {
+            urls: self.urls,
+            client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
         })
     }
 }
 
 /// Scraper with pagination configured.
-pub struct PaginatedScraper {
-    url: String,
+pub struct Paginated {
+    urls: Vec<String>,
     client_builder: ClientBuilder,
-    pagination: Range<usize>,
 }
 
-impl PaginatedScraper {
+impl Paginated {
+    /// Select the first element matching the selector across all pages.
     pub fn select_one(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
-            url: self.url,
+            urls: self.urls,
             client: self.client_builder.build()?,
-            pagination: Some(self.pagination),
             selection_chain: SelectionChain::new().select_one(selector)?,
         })
     }
 
+    /// Select all elements matching the selector across all pages.
     pub fn select_all(self, selector: &str) -> Result<SelectorPipeline> {
         Ok(SelectorPipeline {
-            url: self.url,
+            urls: self.urls,
             client: self.client_builder.build()?,
-            pagination: Some(self.pagination),
             selection_chain: SelectionChain::new().select_all(selector)?,
         })
     }
@@ -128,9 +180,8 @@ impl PaginatedScraper {
 
 /// Pipeline state after selecting elements.
 pub struct SelectorPipeline {
-    url: String,
+    urls: Vec<String>,
     client: Client,
-    pagination: Option<Range<usize>>,
     selection_chain: SelectionChain,
 }
 
@@ -138,9 +189,8 @@ impl SelectorPipeline {
     /// Extract an attribute value.
     pub fn attr(self, attr: &str) -> ExtractorPipeline {
         ExtractorPipeline {
-            url: self.url,
+            urls: self.urls,
             client: self.client,
-            pagination: self.pagination,
             selection_chain: self.selection_chain,
             extractor: Extractor::Attr(attr.to_string()),
         }
@@ -149,9 +199,8 @@ impl SelectorPipeline {
     /// Extract text content.
     pub fn text(self) -> ExtractorPipeline {
         ExtractorPipeline {
-            url: self.url,
+            urls: self.urls,
             client: self.client,
-            pagination: self.pagination,
             selection_chain: self.selection_chain,
             extractor: Extractor::Text,
         }
@@ -160,9 +209,8 @@ impl SelectorPipeline {
     /// Extract inner HTML.
     pub fn html(self) -> ExtractorPipeline {
         ExtractorPipeline {
-            url: self.url,
+            urls: self.urls,
             client: self.client,
-            pagination: self.pagination,
             selection_chain: self.selection_chain,
             extractor: Extractor::Html,
         }
@@ -173,9 +221,8 @@ impl SelectorPipeline {
     /// The type must implement [`Extract`], either manually or via `#[derive(Extract)]`.
     pub fn extract<T: Extract>(self) -> CustomExtractionPipeline<T> {
         CustomExtractionPipeline::<T> {
-            url: self.url,
+            urls: self.urls,
             client: self.client,
-            pagination: self.pagination,
             selection_chain: self.selection_chain,
             _marker: std::marker::PhantomData,
         }
@@ -207,9 +254,8 @@ enum Extractor {
 
 /// Pipeline for extracting string data from selected elements.
 pub struct ExtractorPipeline {
-    url: String,
+    urls: Vec<String>,
     client: Client,
-    pagination: Option<Range<usize>>,
     selection_chain: SelectionChain,
     extractor: Extractor,
 }
@@ -217,7 +263,7 @@ pub struct ExtractorPipeline {
 impl ExtractorPipeline {
     /// Collect extracted values.
     pub async fn collect(self) -> Result<Vec<String>> {
-        let htmls = self.fetch_paginated().await?;
+        let htmls = fetch_all(&self.client, &self.urls).await?;
         let mut results = Vec::new();
         for html in htmls {
             let extracted = html
@@ -233,24 +279,19 @@ impl ExtractorPipeline {
         }
         Ok(results)
     }
-
-    async fn fetch_paginated(&self) -> Result<Vec<Html>> {
-        fetch_pages(&self.client, &self.url, self.pagination.as_ref()).await
-    }
 }
 
 /// Pipeline for extracting typed data from selected elements.
 pub struct CustomExtractionPipeline<T: Extract> {
-    url: String,
+    urls: Vec<String>,
     client: Client,
-    pagination: Option<Range<usize>>,
     selection_chain: SelectionChain,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T: Extract> CustomExtractionPipeline<T> {
     pub async fn collect(self) -> Result<Vec<T>> {
-        let htmls = self.fetch_paginated().await?;
+        let htmls = fetch_all(&self.client, &self.urls).await?;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -262,30 +303,13 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         }
         Ok(results)
     }
-
-    async fn fetch_paginated(&self) -> Result<Vec<Html>> {
-        fetch_pages(&self.client, &self.url, self.pagination.as_ref()).await
-    }
 }
 
 /// Shared helper for fetching pages.
-async fn fetch_pages(
-    client: &Client,
-    url: &str,
-    pagination: Option<&Range<usize>>,
-) -> Result<Vec<Html>> {
+async fn fetch_all(client: &Client, urls: &[String]) -> Result<Vec<Html>> {
     use futures::stream::{self, StreamExt, TryStreamExt};
 
-    let page_urls: Vec<_> = if let Some(range) = pagination {
-        range
-            .clone()
-            .map(|page| url.replace("{page}", &page.to_string()))
-            .collect()
-    } else {
-        vec![url.to_owned()]
-    };
-
-    let htmls = stream::iter(page_urls)
+    let htmls = stream::iter(urls)
         .map(|url| async move {
             let text = client.fetch_text(&url).await;
             text.map(|t| scraper::Html::parse_document(&t))
