@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use crate::error::Result;
+use crate::{error::Result, html::Html};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
 
@@ -50,6 +50,12 @@ impl Client {
         let response = self.inner.get(url).send().await?;
         let response = response.error_for_status()?;
         Ok(response.text().await?)
+    }
+
+    /// Fetch and parse an HTML document from a URL.
+    pub async fn fetch_html(&self, url: &str) -> Result<Html> {
+        let text = self.fetch_text(url).await?;
+        Ok(Html::new(scraper::Html::parse_document(&text)))
     }
 }
 
