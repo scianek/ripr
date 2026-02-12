@@ -1,4 +1,4 @@
-use crate::Element;
+use crate::{Element, selection_chain::SelectionChain};
 
 /// A parsed HTML document.
 ///
@@ -28,5 +28,13 @@ impl Html {
     pub fn select_all(&self, selector: &str) -> Vec<Element<'_>> {
         let element = self.root_element();
         element.select_all(selector)
+    }
+
+    /// Select elements using a selection chain.
+    ///
+    /// See [`SelectionChain`] for details on branching behavior.
+    pub fn select_chain(&self, chain: &SelectionChain) -> Vec<Element<'_>> {
+        let element = self.root_element();
+        element.select_chain(chain)
     }
 }
