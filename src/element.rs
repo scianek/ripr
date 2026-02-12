@@ -1,9 +1,12 @@
 use scraper::ElementRef;
 
+use crate::selection_chain::{SelectMode, SelectionChain};
+
 /// A reference to an HTML element within a parsed document.
 ///
 /// Obtained via [`Html::select_one`], [`Html::select_all`], or the scrape pipeline.
 /// The lifetime `'a` is tied to the [`Html`] document that owns the underlying data.
+#[derive(Clone)]
 pub struct Element<'a> {
     inner: ElementRef<'a>,
 }
@@ -31,6 +34,26 @@ impl<'a> Element<'a> {
             Err(_) => return vec![],
         };
         self.inner.select(&sel).map(Element::new).collect()
+    }
+
+    /// Select elements using a selection chain.
+    pub fn select_chain(&self, chain: &SelectionChain) -> Vec<Element<'a>> {
+        let mut elements = vec![self.clone()];
+
+        for level in &chain.levels {
+            elements = match level {
+                SelectMode::First(selector) => elements
+                    .into_iter()
+                    .filter_map(|el| el.select_one_parsed(&selector))
+                    .collect(),
+                SelectMode::All(selector) => elements
+                    .into_iter()
+                    .flat_map(|el| el.select_all_parsed(&selector))
+                    .collect(),
+            };
+        }
+
+        elements
     }
 
     /// Get the value of an attribute by name.

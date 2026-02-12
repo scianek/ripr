@@ -3,7 +3,8 @@
 use crate::client::{Client, ClientBuilder};
 use crate::element::Element;
 use crate::error::{Error, Result};
-use crate::selection_chain::{Extractor, SelectionChain};
+use crate::html::Html;
+use crate::selection_chain::SelectionChain;
 use std::ops::{Bound, Range, RangeBounds};
 
 /// Entry point for scraping.
@@ -197,8 +198,8 @@ impl SelectorPipeline {
     }
 }
 
-/// What to extract from selected elements.
-pub enum Extractor {
+#[derive(Debug, Clone)]
+enum Extractor {
     Attr(String),
     Text,
     Html,
@@ -219,12 +220,21 @@ impl ExtractorPipeline {
         let htmls = self.fetch_paginated().await?;
         let mut results = Vec::new();
         for html in htmls {
-            results.extend(self.selection_chain.extract(&html, &self.extractor));
+            let extracted = html
+                .select_chain(&self.selection_chain)
+                .into_iter()
+                .map(|el| match &self.extractor {
+                    Extractor::Attr(attr) => el.attr(attr).unwrap_or_default().to_string(),
+                    Extractor::Text => el.text(),
+                    Extractor::Html => el.html(),
+                })
+                .collect::<Vec<_>>();
+            results.extend(extracted);
         }
         Ok(results)
     }
 
-    async fn fetch_paginated(&self) -> Result<Vec<scraper::Html>> {
+    async fn fetch_paginated(&self) -> Result<Vec<Html>> {
         fetch_pages(&self.client, &self.url, self.pagination.as_ref()).await
     }
 }
@@ -243,7 +253,7 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         let htmls = self.fetch_paginated().await?;
         let mut results = Vec::new();
         for html in htmls {
-            let selections = self.selection_chain.select(&html);
+            let selections = html.select_chain(&self.selection_chain);
             let transformed = selections
                 .into_iter()
                 .filter_map(T::extract)
@@ -253,7 +263,7 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         Ok(results)
     }
 
-    async fn fetch_paginated(&self) -> Result<Vec<scraper::Html>> {
+    async fn fetch_paginated(&self) -> Result<Vec<Html>> {
         fetch_pages(&self.client, &self.url, self.pagination.as_ref()).await
     }
 }
@@ -263,7 +273,7 @@ async fn fetch_pages(
     client: &Client,
     url: &str,
     pagination: Option<&Range<usize>>,
-) -> Result<Vec<scraper::Html>> {
+) -> Result<Vec<Html>> {
     use futures::stream::{self, StreamExt, TryStreamExt};
 
     let page_urls: Vec<_> = if let Some(range) = pagination {
@@ -279,6 +289,7 @@ async fn fetch_pages(
         .map(|url| async move {
             let text = client.fetch_text(&url).await;
             text.map(|t| scraper::Html::parse_document(&t))
+                .map(Html::new)
         })
         .buffered(10)
         .try_collect()
