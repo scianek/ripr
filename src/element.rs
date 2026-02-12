@@ -1,6 +1,9 @@
 use scraper::ElementRef;
 
-/// A wrapper around an HTML element that hides scraper implementation details.
+/// A reference to an HTML element within a parsed document.
+///
+/// Obtained via [`Html::select_one`], [`Html::select_all`], or the scrape pipeline.
+/// The lifetime `'a` is tied to the [`Html`] document that owns the underlying data.
 pub struct Element<'a> {
     inner: ElementRef<'a>,
 }

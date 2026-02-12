@@ -30,6 +30,7 @@ pub mod downloader;
 pub mod element;
 pub mod error;
 pub(crate) mod filename;
+pub mod html;
 pub mod pipelines;
 pub mod selection_chain;
 
