@@ -32,6 +32,7 @@ pub mod error;
 pub(crate) mod filename;
 pub mod html;
 pub mod pipelines;
+pub mod progress;
 pub mod selection_chain;
 
 pub mod prelude {
@@ -40,6 +41,7 @@ pub mod prelude {
     pub use crate::element::Element;
     pub use crate::pipelines::download::download;
     pub use crate::pipelines::scrape::{Extract, scrape, scrape_many};
+    pub use crate::progress::Progress;
 }
 
 pub use crate::client::Client;
@@ -47,3 +49,4 @@ pub use crate::downloader::Downloader;
 pub use crate::element::Element;
 pub use crate::pipelines::download::download;
 pub use crate::pipelines::scrape::{Extract, scrape, scrape_many};
+pub use crate::progress::Progress;

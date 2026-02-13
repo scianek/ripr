@@ -1,11 +1,14 @@
 //! Fluent pipeline API for web scraping.
 
+use crate::Progress;
 use crate::client::{Client, ClientBuilder};
 use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::html::Html;
 use crate::selection_chain::SelectionChain;
 use std::ops::{Bound, RangeBounds};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Entry point for scraping a single URL.
 ///
@@ -193,6 +196,7 @@ impl SelectorPipeline {
             client: self.client,
             selection_chain: self.selection_chain,
             extractor: Extractor::Attr(attr.to_string()),
+            progress_callback: None,
         }
     }
 
@@ -203,6 +207,7 @@ impl SelectorPipeline {
             client: self.client,
             selection_chain: self.selection_chain,
             extractor: Extractor::Text,
+            progress_callback: None,
         }
     }
 
@@ -213,6 +218,7 @@ impl SelectorPipeline {
             client: self.client,
             selection_chain: self.selection_chain,
             extractor: Extractor::Html,
+            progress_callback: None,
         }
     }
 
@@ -225,6 +231,7 @@ impl SelectorPipeline {
             client: self.client,
             selection_chain: self.selection_chain,
             _marker: std::marker::PhantomData,
+            progress_callback: None,
         }
     }
 
@@ -258,12 +265,22 @@ pub struct ExtractorPipeline {
     client: Client,
     selection_chain: SelectionChain,
     extractor: Extractor,
+    progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
 }
 
 impl ExtractorPipeline {
+    /// Track scraping progress with a callback.
+    pub fn with_progress<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&Progress) + Send + Sync + 'static,
+    {
+        self.progress_callback = Some(Box::new(callback));
+        self
+    }
+
     /// Collect results, failing on first error (default behavior).
     pub async fn collect(self) -> Result<Vec<String>> {
-        let htmls = fetch_all(&self.client, &self.urls).await?;
+        let htmls = fetch_all(&self.client, &self.urls, self.progress_callback.as_deref()).await?;
         let mut results = Vec::new();
         for html in htmls {
             let elements = html.select_chain(&self.selection_chain);
@@ -280,9 +297,10 @@ impl ExtractorPipeline {
         Ok(results)
     }
 
-    /// Collect successful results, logging and skipping failures.
+    /// Collect successful results, skipping failures silently.
     pub async fn collect_ok(self) -> Vec<String> {
-        let htmls = fetch_all_tolerant(&self.client, &self.urls).await;
+        let htmls =
+            fetch_all_tolerant(&self.client, &self.urls, self.progress_callback.as_deref()).await;
         let mut results = Vec::new();
         for html in htmls {
             let elements = html.select_chain(&self.selection_chain);
@@ -301,7 +319,9 @@ impl ExtractorPipeline {
 
     /// Collect with detailed error information.
     pub async fn collect_with_errors(self) -> (Vec<String>, Vec<FetchError>) {
-        let (htmls, errors) = fetch_all_with_errors(&self.client, &self.urls).await;
+        let (htmls, errors) =
+            fetch_all_with_errors(&self.client, &self.urls, self.progress_callback.as_deref())
+                .await;
         let mut results = Vec::new();
         for html in htmls {
             let elements = html.select_chain(&self.selection_chain);
@@ -324,13 +344,23 @@ pub struct CustomExtractionPipeline<T: Extract> {
     urls: Vec<String>,
     client: Client,
     selection_chain: SelectionChain,
+    progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T: Extract> CustomExtractionPipeline<T> {
+    /// Track scraping progress with a callback.
+    pub fn with_progress<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&Progress) + Send + Sync + 'static,
+    {
+        self.progress_callback = Some(Box::new(callback));
+        self
+    }
+
     /// Collect results, failing on first error.
     pub async fn collect(self) -> Result<Vec<T>> {
-        let htmls = fetch_all(&self.client, &self.urls).await?;
+        let htmls = fetch_all(&self.client, &self.urls, self.progress_callback.as_deref()).await?;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -345,7 +375,8 @@ impl<T: Extract> CustomExtractionPipeline<T> {
 
     /// Collect successful results, skipping failures silently.
     pub async fn collect_ok(self) -> Vec<T> {
-        let htmls = fetch_all_tolerant(&self.client, &self.urls).await;
+        let htmls =
+            fetch_all_tolerant(&self.client, &self.urls, self.progress_callback.as_deref()).await;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -360,7 +391,9 @@ impl<T: Extract> CustomExtractionPipeline<T> {
 
     /// Collect with detailed error information.
     pub async fn collect_with_errors(self) -> (Vec<T>, Vec<FetchError>) {
-        let (htmls, errors) = fetch_all_with_errors(&self.client, &self.urls).await;
+        let (htmls, errors) =
+            fetch_all_with_errors(&self.client, &self.urls, self.progress_callback.as_deref())
+                .await;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -384,11 +417,30 @@ pub struct FetchError {
 }
 
 /// Fetch all URLs, failing on first error.
-async fn fetch_all(client: &Client, urls: &[String]) -> Result<Vec<Html>> {
+async fn fetch_all(
+    client: &Client,
+    urls: &[String],
+    progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
+) -> Result<Vec<Html>> {
     use futures::stream::{self, StreamExt, TryStreamExt};
 
+    let total = urls.len();
+    let completed = Arc::new(AtomicUsize::new(0));
+
     let htmls = stream::iter(urls)
-        .map(|url| async move { client.fetch_html(url).await })
+        .map(|url| {
+            let completed = completed.clone();
+            async move {
+                let result = client.fetch_html(url).await?;
+
+                let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(callback) = progress_fn {
+                    callback(&Progress::new(current, total));
+                }
+
+                Ok::<_, Error>(result)
+            }
+        })
         .buffered(10)
         .try_collect()
         .await?;
@@ -396,14 +448,30 @@ async fn fetch_all(client: &Client, urls: &[String]) -> Result<Vec<Html>> {
     Ok(htmls)
 }
 
-/// Fetch all URLs, logging and skipping failures.
 /// Fetch all URLs, skipping failures silently.
-async fn fetch_all_tolerant(client: &Client, urls: &[String]) -> Vec<Html> {
+async fn fetch_all_tolerant(
+    client: &Client,
+    urls: &[String],
+    progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
+) -> Vec<Html> {
     use futures::stream::{self, StreamExt};
 
+    let total = urls.len();
+    let completed = Arc::new(AtomicUsize::new(0));
+
     stream::iter(urls)
-        .map(|url| async move {
-            client.fetch_html(url).await.ok() // Convert to Option, discard error
+        .map(|url| {
+            let completed = completed.clone();
+            async move {
+                let result = client.fetch_html(url).await.ok();
+
+                let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(callback) = progress_fn {
+                    callback(&Progress::new(current, total));
+                }
+
+                result
+            }
         })
         .buffered(10)
         .filter_map(|result| async { result })
@@ -412,20 +480,35 @@ async fn fetch_all_tolerant(client: &Client, urls: &[String]) -> Vec<Html> {
 }
 
 /// Fetch all URLs, collecting both successes and errors.
-async fn fetch_all_with_errors(client: &Client, urls: &[String]) -> (Vec<Html>, Vec<FetchError>) {
+async fn fetch_all_with_errors(
+    client: &Client,
+    urls: &[String],
+    progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
+) -> (Vec<Html>, Vec<FetchError>) {
     use futures::stream::{self, StreamExt};
+
+    let total = urls.len();
+    let completed = Arc::new(AtomicUsize::new(0));
 
     let results: Vec<_> = stream::iter(urls)
         .map(|url| {
             let url = url.clone();
+            let completed = completed.clone();
             async move {
-                match client.fetch_html(&url).await {
+                let result = match client.fetch_html(&url).await {
                     Ok(html) => Ok(html),
                     Err(e) => Err(FetchError {
                         url: url.clone(),
                         error: e,
                     }),
+                };
+
+                let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(callback) = progress_fn {
+                    callback(&Progress::new(current, total));
                 }
+
+                result
             }
         })
         .buffered(10)

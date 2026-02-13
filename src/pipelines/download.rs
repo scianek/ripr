@@ -1,8 +1,11 @@
 use crate::downloader::Downloader;
 use crate::error::Result;
+use crate::progress::Progress;
 use crate::{client::Client, filename::filename_from_url};
 use futures::stream::{self, StreamExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Entry point for downloading from URLs.
 pub fn download(urls: &[String]) -> DownloadPipeline {
@@ -41,6 +44,7 @@ impl DownloadPipeline {
             dir: dir.as_ref().to_path_buf(),
             concurrency: self.concurrency,
             naming_fn: None,
+            progress_callback: None,
         }
     }
 }
@@ -52,6 +56,7 @@ pub struct ConfiguredDownloadPipeline {
     dir: PathBuf,
     concurrency: usize,
     naming_fn: Option<Box<dyn Fn(usize, &str) -> String + Send + Sync>>,
+    progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
 }
 
 impl ConfiguredDownloadPipeline {
@@ -61,6 +66,15 @@ impl ConfiguredDownloadPipeline {
         F: Fn(usize, &str) -> String + Send + Sync + 'static,
     {
         self.naming_fn = Some(Box::new(f));
+        self
+    }
+
+    /// Track download progress with a callback.
+    pub fn with_progress<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&Progress) + Send + Sync + 'static,
+    {
+        self.progress_callback = Some(Box::new(callback));
         self
     }
 
@@ -74,15 +88,30 @@ impl ConfiguredDownloadPipeline {
             .naming_fn
             .unwrap_or_else(|| Box::new(|_idx, url| filename_from_url(url)));
 
+        let total = self.urls.len();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let progress_callback = self.progress_callback.map(Arc::new);
+
         stream::iter(self.urls)
             .enumerate()
             .map(|(idx, url)| {
                 let downloader = Downloader::new(self.client.clone());
                 let dir = self.dir.clone();
                 let filename = naming_fn(idx, &url);
+                let completed = completed.clone();
+                let progress_callback = progress_callback.clone();
+
                 async move {
                     let path = dir.join(filename);
-                    downloader.download(&url, path).await
+                    let result = downloader.download(&url, path).await;
+
+                    // Update progress
+                    let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(callback) = progress_callback.as_ref() {
+                        callback(&Progress::new(current, total));
+                    }
+
+                    result
                 }
             })
             .buffered(self.concurrency)
