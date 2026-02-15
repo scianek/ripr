@@ -1,6 +1,7 @@
 //! Fluent pipeline API for web scraping.
 
 use crate::Progress;
+use crate::cache::Cache;
 use crate::client::{Client, ClientBuilder};
 use crate::element::Element;
 use crate::error::{Error, Result};
@@ -90,6 +91,7 @@ impl ScraperPipeline {
             urls: vec![self.url],
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_one(selector)?,
+            checkpoint: None,
         })
     }
 
@@ -99,6 +101,7 @@ impl ScraperPipeline {
             urls: vec![self.url],
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
+            checkpoint: None,
         })
     }
 }
@@ -142,6 +145,7 @@ impl MultiScraper {
             urls: self.urls,
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_one(selector)?,
+            checkpoint: None,
         })
     }
 
@@ -151,6 +155,7 @@ impl MultiScraper {
             urls: self.urls,
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
+            checkpoint: None,
         })
     }
 }
@@ -168,6 +173,7 @@ impl Paginated {
             urls: self.urls,
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_one(selector)?,
+            checkpoint: None,
         })
     }
 
@@ -177,6 +183,7 @@ impl Paginated {
             urls: self.urls,
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
+            checkpoint: None,
         })
     }
 }
@@ -186,9 +193,20 @@ pub struct SelectorPipeline {
     urls: Vec<String>,
     client: Client,
     selection_chain: SelectionChain,
+    checkpoint: Option<String>,
 }
 
 impl SelectorPipeline {
+    /// Cache fetched HTML to disk under the given name.
+    ///
+    /// On subsequent runs with the same URLs, the cached HTML is served from
+    /// disk instead of making network requests. Cache files are stored in
+    /// `.ripr-cache/`. Delete that directory to force a fresh fetch.
+    pub fn checkpoint(mut self, name: &str) -> Self {
+        self.checkpoint = Some(name.to_string());
+        self
+    }
+
     /// Extract an attribute value.
     pub fn attr(self, attr: &str) -> ExtractorPipeline {
         ExtractorPipeline {
@@ -197,6 +215,7 @@ impl SelectorPipeline {
             selection_chain: self.selection_chain,
             extractor: Extractor::Attr(attr.to_string()),
             progress_callback: None,
+            checkpoint: self.checkpoint,
         }
     }
 
@@ -208,6 +227,7 @@ impl SelectorPipeline {
             selection_chain: self.selection_chain,
             extractor: Extractor::Text,
             progress_callback: None,
+            checkpoint: self.checkpoint,
         }
     }
 
@@ -219,6 +239,7 @@ impl SelectorPipeline {
             selection_chain: self.selection_chain,
             extractor: Extractor::Html,
             progress_callback: None,
+            checkpoint: self.checkpoint,
         }
     }
 
@@ -232,6 +253,7 @@ impl SelectorPipeline {
             selection_chain: self.selection_chain,
             _marker: std::marker::PhantomData,
             progress_callback: None,
+            checkpoint: self.checkpoint,
         }
     }
 
@@ -266,6 +288,7 @@ pub struct ExtractorPipeline {
     selection_chain: SelectionChain,
     extractor: Extractor,
     progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
+    checkpoint: Option<String>,
 }
 
 impl ExtractorPipeline {
@@ -280,7 +303,13 @@ impl ExtractorPipeline {
 
     /// Collect results, failing on first error (default behavior).
     pub async fn collect(self) -> Result<Vec<String>> {
-        let htmls = fetch_all(&self.client, &self.urls, self.progress_callback.as_deref()).await?;
+        let htmls = fetch_all_cached(
+            &self.client,
+            &self.urls,
+            self.checkpoint.as_deref(),
+            self.progress_callback.as_deref(),
+        )
+        .await?;
         let mut results = Vec::new();
         for html in htmls {
             let elements = html.select_chain(&self.selection_chain);
@@ -299,8 +328,13 @@ impl ExtractorPipeline {
 
     /// Collect successful results, skipping failures silently.
     pub async fn collect_ok(self) -> Vec<String> {
-        let htmls =
-            fetch_all_tolerant(&self.client, &self.urls, self.progress_callback.as_deref()).await;
+        let htmls = fetch_all_tolerant_cached(
+            &self.client,
+            &self.urls,
+            self.checkpoint.as_deref(),
+            self.progress_callback.as_deref(),
+        )
+        .await;
         let mut results = Vec::new();
         for html in htmls {
             let elements = html.select_chain(&self.selection_chain);
@@ -319,9 +353,13 @@ impl ExtractorPipeline {
 
     /// Collect with detailed error information.
     pub async fn collect_with_errors(self) -> (Vec<String>, Vec<FetchError>) {
-        let (htmls, errors) =
-            fetch_all_with_errors(&self.client, &self.urls, self.progress_callback.as_deref())
-                .await;
+        let (htmls, errors) = fetch_all_with_errors_cached(
+            &self.client,
+            &self.urls,
+            self.checkpoint.as_deref(),
+            self.progress_callback.as_deref(),
+        )
+        .await;
         let mut results = Vec::new();
         for html in htmls {
             let elements = html.select_chain(&self.selection_chain);
@@ -345,6 +383,7 @@ pub struct CustomExtractionPipeline<T: Extract> {
     client: Client,
     selection_chain: SelectionChain,
     progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
+    checkpoint: Option<String>,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -360,7 +399,13 @@ impl<T: Extract> CustomExtractionPipeline<T> {
 
     /// Collect results, failing on first error.
     pub async fn collect(self) -> Result<Vec<T>> {
-        let htmls = fetch_all(&self.client, &self.urls, self.progress_callback.as_deref()).await?;
+        let htmls = fetch_all_cached(
+            &self.client,
+            &self.urls,
+            self.checkpoint.as_deref(),
+            self.progress_callback.as_deref(),
+        )
+        .await?;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -375,8 +420,13 @@ impl<T: Extract> CustomExtractionPipeline<T> {
 
     /// Collect successful results, skipping failures silently.
     pub async fn collect_ok(self) -> Vec<T> {
-        let htmls =
-            fetch_all_tolerant(&self.client, &self.urls, self.progress_callback.as_deref()).await;
+        let htmls = fetch_all_tolerant_cached(
+            &self.client,
+            &self.urls,
+            self.checkpoint.as_deref(),
+            self.progress_callback.as_deref(),
+        )
+        .await;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -391,9 +441,13 @@ impl<T: Extract> CustomExtractionPipeline<T> {
 
     /// Collect with detailed error information.
     pub async fn collect_with_errors(self) -> (Vec<T>, Vec<FetchError>) {
-        let (htmls, errors) =
-            fetch_all_with_errors(&self.client, &self.urls, self.progress_callback.as_deref())
-                .await;
+        let (htmls, errors) = fetch_all_with_errors_cached(
+            &self.client,
+            &self.urls,
+            self.checkpoint.as_deref(),
+            self.progress_callback.as_deref(),
+        )
+        .await;
         let mut results = Vec::new();
         for html in htmls {
             let selections = html.select_chain(&self.selection_chain);
@@ -526,6 +580,71 @@ async fn fetch_all_with_errors(
     }
 
     (htmls, errors)
+}
+
+/// Fetch all URLs with optional caching.
+async fn fetch_all_cached(
+    client: &Client,
+    urls: &[String],
+    checkpoint: Option<&str>,
+    progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
+) -> Result<Vec<Html>> {
+    if let Some(name) = checkpoint {
+        if let Some(cached) = Cache::load(name, urls).await? {
+            return Ok(cached);
+        }
+    }
+
+    let htmls = fetch_all(client, urls, progress_fn).await?;
+
+    if let Some(name) = checkpoint {
+        Cache::save(name, urls, &htmls).await?;
+    }
+
+    Ok(htmls)
+}
+
+// Similar for tolerant and with_errors variants
+async fn fetch_all_tolerant_cached(
+    client: &Client,
+    urls: &[String],
+    checkpoint: Option<&str>,
+    progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
+) -> Vec<Html> {
+    if let Some(name) = checkpoint {
+        if let Ok(Some(cached)) = Cache::load(name, urls).await {
+            return cached;
+        }
+    }
+
+    let htmls = fetch_all_tolerant(client, urls, progress_fn).await;
+
+    if let Some(name) = checkpoint {
+        let _ = Cache::save(name, urls, &htmls).await;
+    }
+
+    htmls
+}
+
+async fn fetch_all_with_errors_cached(
+    client: &Client,
+    urls: &[String],
+    checkpoint: Option<&str>,
+    progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
+) -> (Vec<Html>, Vec<FetchError>) {
+    if let Some(name) = checkpoint {
+        if let Ok(Some(cached)) = Cache::load(name, urls).await {
+            return (cached, vec![]);
+        }
+    }
+
+    let result = fetch_all_with_errors(client, urls, progress_fn).await;
+
+    if let Some(name) = checkpoint {
+        let _ = Cache::save(name, urls, &result.0).await;
+    }
+
+    result
 }
 
 pub trait Extract: Sized {

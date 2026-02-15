@@ -28,6 +28,10 @@ pub enum Error {
     /// Error occurred while validating pagination parameters.
     #[error("Pagination error: {0}")]
     PaginationError(String),
+
+    /// Error occurred while serializing or deserializing JSON.
+    #[error("JSON serialization error: {0}")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 /// A specialized Result type for ripr.
