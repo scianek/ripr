@@ -25,6 +25,7 @@
 //! }
 //! ```
 
+pub(crate) mod cache;
 pub mod client;
 pub mod downloader;
 pub mod element;
