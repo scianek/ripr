@@ -1256,6 +1256,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "reqwest",
+ "ripr-derive",
  "sanitize-filename",
  "scraper",
  "serde",
@@ -1263,6 +1264,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "ripr-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

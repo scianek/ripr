@@ -13,6 +13,11 @@ impl Html {
         Self { inner }
     }
 
+    /// Parse HTML from a string.
+    pub fn from_str(html: &str) -> Self {
+        Self::new(scraper::Html::parse_document(html))
+    }
+
     /// Get the root element of the document.
     pub fn root_element(&self) -> Element<'_> {
         Element::new(self.inner.root_element())

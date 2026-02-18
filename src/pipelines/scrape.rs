@@ -647,6 +647,25 @@ async fn fetch_all_with_errors_cached(
     result
 }
 
+/// Trait for extracting typed data from an HTML [`Element`].
+///
+/// Implement this manually or derive it with `#[derive(Extract)]` from the
+/// `ripr-derive` crate.
+///
+/// # Example
+///
+/// ```ignore
+/// use ripr_derive::Extract;
+///
+/// #[derive(Extract)]
+/// struct Article {
+///     #[extract(selector = "h1", attr = "text")]
+///     title: String,
+///
+///     #[extract(selector = "a.read-more", attr = "href")]
+///     url: String,
+/// }
+/// ```
 pub trait Extract: Sized {
     /// Extract a value from the given element, returning `None` if extraction fails.
     fn extract(selectable: Element) -> Option<Self>;

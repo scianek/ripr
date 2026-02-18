@@ -43,6 +43,9 @@ pub mod prelude {
     pub use crate::pipelines::download::download;
     pub use crate::pipelines::scrape::{Extract, scrape, scrape_many};
     pub use crate::progress::Progress;
+
+    #[cfg(feature = "derive")]
+    pub use ripr_derive::Extract;
 }
 
 pub use crate::client::Client;
@@ -51,3 +54,6 @@ pub use crate::element::Element;
 pub use crate::pipelines::download::download;
 pub use crate::pipelines::scrape::{Extract, scrape, scrape_many};
 pub use crate::progress::Progress;
+
+#[cfg(feature = "derive")]
+pub use ripr_derive::Extract;
