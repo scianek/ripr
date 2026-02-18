@@ -1,2 +1,3 @@
 /target
 .ripr-cache/
+/ripr-derive/target
