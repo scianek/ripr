@@ -2,6 +2,18 @@
 //!
 //! Declarative web scraping for extracting and downloading media.
 //!
+//! ## Overview
+//!
+//! ripr is built around a fluent pipeline API. The typical flow is:
+//! 1. Start with [`scrape`] or [`scrape_many`]
+//! 2. Optionally configure pagination, headers, or concurrency
+//! 3. Select elements with CSS selectors
+//! 4. Extract text, attributes, or structured data via [`Extract`]
+//! 5. Optionally download results with [`download`]
+//!
+//! The lower-level [`Client`], [`Downloader`], [`Html`], and [`Element`]
+//! types are also available for building custom pipelines.
+//!
 //! ## Quick Start
 //!
 //! ```no_run
