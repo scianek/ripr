@@ -150,3 +150,99 @@ impl Default for SelectionChain<Empty> {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_select_one_transitions_to_non_empty() {
+        let chain = SelectionChain::new().select_one("div");
+        assert!(chain.is_ok());
+    }
+
+    #[test]
+    fn test_select_all_transitions_to_non_empty() {
+        let chain = SelectionChain::new().select_all("div");
+        assert!(chain.is_ok());
+    }
+
+    #[test]
+    fn test_invalid_selector_returns_error() {
+        let result = SelectionChain::new().select_one("<<<");
+        assert!(matches!(result, Err(Error::InvalidSelector(_))));
+    }
+
+    #[test]
+    fn test_chaining_multiple_levels() {
+        let chain = SelectionChain::new()
+            .select_all(".post")
+            .unwrap()
+            .select_one("img")
+            .unwrap()
+            .select_all("source");
+        assert!(chain.is_ok());
+        assert_eq!(chain.unwrap().levels.len(), 3);
+    }
+
+    #[test]
+    fn test_branching_vs_flat() {
+        use crate::html::Html;
+
+        let html = Html::from_str(
+            r#"
+            <div class="post"><img src="a.jpg"/><img src="b.jpg"/></div>
+            <div class="post"><img src="c.jpg"/><img src="d.jpg"/></div>
+        "#,
+        );
+
+        // branching: select_all then select_one gives first img per post
+        let chain = SelectionChain::new()
+            .select_all(".post")
+            .unwrap()
+            .select_one("img")
+            .unwrap();
+        let results: Vec<_> = html
+            .select_chain(&chain)
+            .into_iter()
+            .filter_map(|el| el.attr("src").map(String::from))
+            .collect();
+        assert_eq!(results, vec!["a.jpg", "c.jpg"]);
+
+        // flat: select_all gives every img regardless of container
+        let chain = SelectionChain::new().select_all("img").unwrap();
+        let results: Vec<_> = html
+            .select_chain(&chain)
+            .into_iter()
+            .filter_map(|el| el.attr("src").map(String::from))
+            .collect();
+        assert_eq!(results, vec!["a.jpg", "b.jpg", "c.jpg", "d.jpg"]);
+    }
+
+    #[test]
+    fn test_empty_results_at_intermediate_level() {
+        use crate::html::Html;
+
+        let html = Html::from_str(r#"<div class="post"></div>"#);
+
+        let chain = SelectionChain::new()
+            .select_all(".post")
+            .unwrap()
+            .select_one("img")
+            .unwrap();
+
+        let results = html.select_chain(&chain);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_no_matches_returns_empty() {
+        use crate::html::Html;
+
+        let html = Html::from_str(r#"<div class="post"><img src="a.jpg"/></div>"#);
+
+        let chain = SelectionChain::new().select_all(".nonexistent").unwrap();
+        let results = html.select_chain(&chain);
+        assert!(results.is_empty());
+    }
+}
