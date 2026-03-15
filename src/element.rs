@@ -1,6 +1,6 @@
 use scraper::ElementRef;
 
-use crate::selection_chain::{SelectMode, SelectionChain};
+use crate::selection_chain::{NonEmpty, SelectMode, SelectionChain};
 
 /// A reference to an HTML element within a parsed document.
 ///
@@ -36,19 +36,19 @@ impl<'a> Element<'a> {
         self.inner.select(&sel).map(Element::new).collect()
     }
 
-    /// Select elements using a selection chain.
-    pub fn select_chain(&self, chain: &SelectionChain) -> Vec<Element<'a>> {
+    /// Select elements using a non-empty selection chain.
+    pub fn select_chain(&self, chain: &SelectionChain<NonEmpty>) -> Vec<Element<'a>> {
         let mut elements = vec![self.clone()];
 
         for level in &chain.levels {
             elements = match level {
                 SelectMode::First(selector) => elements
                     .into_iter()
-                    .filter_map(|el| el.select_one_parsed(&selector))
+                    .filter_map(|el| el.select_one_parsed(selector))
                     .collect(),
                 SelectMode::All(selector) => elements
                     .into_iter()
-                    .flat_map(|el| el.select_all_parsed(&selector))
+                    .flat_map(|el| el.select_all_parsed(selector))
                     .collect(),
             };
         }
