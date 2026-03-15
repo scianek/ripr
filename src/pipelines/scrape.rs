@@ -667,3 +667,62 @@ pub trait Extract: Sized {
     /// Extract a value from the given element, returning `None` if extraction fails.
     fn extract(selectable: Element) -> Option<Self>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pages_requires_placeholder() {
+        let result = scrape("https://example.com/posts").pages(1..=5);
+        assert!(matches!(result, Err(Error::PaginationError(_))));
+    }
+
+    #[test]
+    fn test_pages_requires_bounded_start() {
+        let result = scrape("https://example.com?page={page}").pages(..=5);
+        assert!(matches!(result, Err(Error::PaginationError(_))));
+    }
+
+    #[test]
+    fn test_pages_requires_bounded_end() {
+        let result = scrape("https://example.com?page={page}").pages(1..);
+        assert!(matches!(result, Err(Error::PaginationError(_))));
+    }
+
+    #[test]
+    fn test_pages_start_must_be_less_than_end() {
+        let result = scrape("https://example.com?page={page}").pages(5..=3);
+        assert!(matches!(result, Err(Error::PaginationError(_))));
+    }
+
+    #[test]
+    fn test_pages_inclusive_range_produces_correct_urls() {
+        let paginated = scrape("https://example.com?page={page}")
+            .pages(1..=3)
+            .unwrap();
+        assert_eq!(
+            paginated.urls,
+            vec![
+                "https://example.com?page=1",
+                "https://example.com?page=2",
+                "https://example.com?page=3",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_pages_exclusive_range_produces_correct_urls() {
+        let paginated = scrape("https://example.com?page={page}")
+            .pages(1..4)
+            .unwrap();
+        assert_eq!(
+            paginated.urls,
+            vec![
+                "https://example.com?page=1",
+                "https://example.com?page=2",
+                "https://example.com?page=3",
+            ]
+        );
+    }
+}
