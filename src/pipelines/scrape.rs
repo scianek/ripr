@@ -92,6 +92,7 @@ impl ScraperPipeline {
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_one(selector)?,
             checkpoint: None,
+            concurrency: 10,
         })
     }
 
@@ -102,6 +103,7 @@ impl ScraperPipeline {
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
             checkpoint: None,
+            concurrency: 10,
         })
     }
 }
@@ -146,6 +148,7 @@ impl MultiScraper {
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_one(selector)?,
             checkpoint: None,
+            concurrency: 10,
         })
     }
 
@@ -156,6 +159,7 @@ impl MultiScraper {
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
             checkpoint: None,
+            concurrency: 10,
         })
     }
 }
@@ -174,6 +178,7 @@ impl Paginated {
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_one(selector)?,
             checkpoint: None,
+            concurrency: 10,
         })
     }
 
@@ -184,6 +189,7 @@ impl Paginated {
             client: self.client_builder.build()?,
             selection_chain: SelectionChain::new().select_all(selector)?,
             checkpoint: None,
+            concurrency: 10,
         })
     }
 }
@@ -194,6 +200,7 @@ pub struct SelectorPipeline {
     client: Client,
     selection_chain: SelectionChain,
     checkpoint: Option<String>,
+    concurrency: usize,
 }
 
 impl SelectorPipeline {
@@ -207,6 +214,12 @@ impl SelectorPipeline {
         self
     }
 
+    /// Set the number of pages fetched concurrently. Defaults to 10.
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
+    }
+
     /// Extract an attribute value.
     pub fn attr(self, attr: &str) -> ExtractorPipeline {
         ExtractorPipeline {
@@ -216,6 +229,7 @@ impl SelectorPipeline {
             extractor: Extractor::Attr(attr.to_string()),
             progress_callback: None,
             checkpoint: self.checkpoint,
+            concurrency: self.concurrency,
         }
     }
 
@@ -228,6 +242,7 @@ impl SelectorPipeline {
             extractor: Extractor::Text,
             progress_callback: None,
             checkpoint: self.checkpoint,
+            concurrency: self.concurrency,
         }
     }
 
@@ -240,6 +255,7 @@ impl SelectorPipeline {
             extractor: Extractor::Html,
             progress_callback: None,
             checkpoint: self.checkpoint,
+            concurrency: self.concurrency,
         }
     }
 
@@ -254,6 +270,7 @@ impl SelectorPipeline {
             _marker: std::marker::PhantomData,
             progress_callback: None,
             checkpoint: self.checkpoint,
+            concurrency: self.concurrency,
         }
     }
 
@@ -289,6 +306,7 @@ pub struct ExtractorPipeline {
     extractor: Extractor,
     progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
     checkpoint: Option<String>,
+    concurrency: usize,
 }
 
 impl ExtractorPipeline {
@@ -306,24 +324,12 @@ impl ExtractorPipeline {
         let htmls = fetch_all_cached(
             &self.client,
             &self.urls,
+            self.concurrency,
             self.checkpoint.as_deref(),
             self.progress_callback.as_deref(),
         )
         .await?;
-        let mut results = Vec::new();
-        for html in htmls {
-            let elements = html.select_chain(&self.selection_chain);
-            let extracted: Vec<String> = match &self.extractor {
-                Extractor::Attr(attr) => elements
-                    .into_iter()
-                    .filter_map(|el| el.attr(attr).map(String::from))
-                    .collect(),
-                Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
-                Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
-            };
-            results.extend(extracted);
-        }
-        Ok(results)
+        Ok(extract_all(htmls, &self.extractor, &self.selection_chain))
     }
 
     /// Collect successful results, skipping failures silently.
@@ -331,24 +337,12 @@ impl ExtractorPipeline {
         let htmls = fetch_all_tolerant_cached(
             &self.client,
             &self.urls,
+            self.concurrency,
             self.checkpoint.as_deref(),
             self.progress_callback.as_deref(),
         )
         .await;
-        let mut results = Vec::new();
-        for html in htmls {
-            let elements = html.select_chain(&self.selection_chain);
-            let extracted: Vec<String> = match &self.extractor {
-                Extractor::Attr(attr) => elements
-                    .into_iter()
-                    .filter_map(|el| el.attr(attr).map(String::from))
-                    .collect(),
-                Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
-                Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
-            };
-            results.extend(extracted);
-        }
-        results
+        extract_all(htmls, &self.extractor, &self.selection_chain)
     }
 
     /// Collect with detailed error information.
@@ -356,25 +350,33 @@ impl ExtractorPipeline {
         let (htmls, errors) = fetch_all_with_errors_cached(
             &self.client,
             &self.urls,
+            self.concurrency,
             self.checkpoint.as_deref(),
             self.progress_callback.as_deref(),
         )
         .await;
-        let mut results = Vec::new();
-        for html in htmls {
-            let elements = html.select_chain(&self.selection_chain);
-            let extracted: Vec<String> = match &self.extractor {
-                Extractor::Attr(attr) => elements
-                    .into_iter()
-                    .filter_map(|el| el.attr(attr).map(String::from))
-                    .collect(),
-                Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
-                Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
-            };
-            results.extend(extracted);
-        }
-        (results, errors)
+        (
+            extract_all(htmls, &self.extractor, &self.selection_chain),
+            errors,
+        )
     }
+}
+
+fn extract_all(htmls: Vec<Html>, extractor: &Extractor, chain: &SelectionChain) -> Vec<String> {
+    let mut results = Vec::new();
+    for html in htmls {
+        let elements = html.select_chain(chain);
+        let extracted: Vec<String> = match extractor {
+            Extractor::Attr(attr) => elements
+                .into_iter()
+                .filter_map(|el| el.attr(attr).map(String::from))
+                .collect(),
+            Extractor::Text => elements.into_iter().map(|el| el.text()).collect(),
+            Extractor::Html => elements.into_iter().map(|el| el.html()).collect(),
+        };
+        results.extend(extracted);
+    }
+    results
 }
 
 /// Pipeline for extracting typed data from selected elements.
@@ -384,6 +386,7 @@ pub struct CustomExtractionPipeline<T: Extract> {
     selection_chain: SelectionChain,
     progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
     checkpoint: Option<String>,
+    concurrency: usize,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -402,20 +405,12 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         let htmls = fetch_all_cached(
             &self.client,
             &self.urls,
+            self.concurrency,
             self.checkpoint.as_deref(),
             self.progress_callback.as_deref(),
         )
         .await?;
-        let mut results = Vec::new();
-        for html in htmls {
-            let selections = html.select_chain(&self.selection_chain);
-            let transformed = selections
-                .into_iter()
-                .filter_map(T::extract)
-                .collect::<Vec<_>>();
-            results.extend(transformed);
-        }
-        Ok(results)
+        Ok(extract_all_custom(htmls, &self.selection_chain))
     }
 
     /// Collect successful results, skipping failures silently.
@@ -423,20 +418,12 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         let htmls = fetch_all_tolerant_cached(
             &self.client,
             &self.urls,
+            self.concurrency,
             self.checkpoint.as_deref(),
             self.progress_callback.as_deref(),
         )
         .await;
-        let mut results = Vec::new();
-        for html in htmls {
-            let selections = html.select_chain(&self.selection_chain);
-            let transformed = selections
-                .into_iter()
-                .filter_map(T::extract)
-                .collect::<Vec<_>>();
-            results.extend(transformed);
-        }
-        results
+        extract_all_custom(htmls, &self.selection_chain)
     }
 
     /// Collect with detailed error information.
@@ -444,21 +431,22 @@ impl<T: Extract> CustomExtractionPipeline<T> {
         let (htmls, errors) = fetch_all_with_errors_cached(
             &self.client,
             &self.urls,
+            self.concurrency,
             self.checkpoint.as_deref(),
             self.progress_callback.as_deref(),
         )
         .await;
-        let mut results = Vec::new();
-        for html in htmls {
-            let selections = html.select_chain(&self.selection_chain);
-            let transformed = selections
-                .into_iter()
-                .filter_map(T::extract)
-                .collect::<Vec<_>>();
-            results.extend(transformed);
-        }
-        (results, errors)
+        (extract_all_custom(htmls, &self.selection_chain), errors)
     }
+}
+
+fn extract_all_custom<T: Extract>(htmls: Vec<Html>, chain: &SelectionChain) -> Vec<T> {
+    let mut results = Vec::new();
+    for html in htmls {
+        let selections = html.select_chain(chain);
+        results.extend(selections.into_iter().filter_map(T::extract));
+    }
+    results
 }
 
 /// Error information for failed fetches.
@@ -474,6 +462,7 @@ pub struct FetchError {
 async fn fetch_all(
     client: &Client,
     urls: &[String],
+    concurrency: usize,
     progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
 ) -> Result<Vec<Html>> {
     use futures::stream::{self, StreamExt, TryStreamExt};
@@ -495,7 +484,7 @@ async fn fetch_all(
                 Ok::<_, Error>(result)
             }
         })
-        .buffered(10)
+        .buffered(concurrency)
         .try_collect()
         .await?;
 
@@ -506,6 +495,7 @@ async fn fetch_all(
 async fn fetch_all_tolerant(
     client: &Client,
     urls: &[String],
+    concurrency: usize,
     progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
 ) -> Vec<Html> {
     use futures::stream::{self, StreamExt};
@@ -527,7 +517,7 @@ async fn fetch_all_tolerant(
                 result
             }
         })
-        .buffered(10)
+        .buffered(concurrency)
         .filter_map(|result| async { result })
         .collect()
         .await
@@ -537,6 +527,7 @@ async fn fetch_all_tolerant(
 async fn fetch_all_with_errors(
     client: &Client,
     urls: &[String],
+    concurrency: usize,
     progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
 ) -> (Vec<Html>, Vec<FetchError>) {
     use futures::stream::{self, StreamExt};
@@ -565,7 +556,7 @@ async fn fetch_all_with_errors(
                 result
             }
         })
-        .buffered(10)
+        .buffered(concurrency)
         .collect()
         .await;
 
@@ -586,6 +577,7 @@ async fn fetch_all_with_errors(
 async fn fetch_all_cached(
     client: &Client,
     urls: &[String],
+    concurrency: usize,
     checkpoint: Option<&str>,
     progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
 ) -> Result<Vec<Html>> {
@@ -595,7 +587,7 @@ async fn fetch_all_cached(
         }
     }
 
-    let htmls = fetch_all(client, urls, progress_fn).await?;
+    let htmls = fetch_all(client, urls, concurrency, progress_fn).await?;
 
     if let Some(name) = checkpoint {
         Cache::save(name, urls, &htmls).await?;
@@ -604,10 +596,10 @@ async fn fetch_all_cached(
     Ok(htmls)
 }
 
-// Similar for tolerant and with_errors variants
 async fn fetch_all_tolerant_cached(
     client: &Client,
     urls: &[String],
+    concurrency: usize,
     checkpoint: Option<&str>,
     progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
 ) -> Vec<Html> {
@@ -617,7 +609,7 @@ async fn fetch_all_tolerant_cached(
         }
     }
 
-    let htmls = fetch_all_tolerant(client, urls, progress_fn).await;
+    let htmls = fetch_all_tolerant(client, urls, concurrency, progress_fn).await;
 
     if let Some(name) = checkpoint {
         let _ = Cache::save(name, urls, &htmls).await;
@@ -629,6 +621,7 @@ async fn fetch_all_tolerant_cached(
 async fn fetch_all_with_errors_cached(
     client: &Client,
     urls: &[String],
+    concurrency: usize,
     checkpoint: Option<&str>,
     progress_fn: Option<&(dyn Fn(&Progress) + Send + Sync)>,
 ) -> (Vec<Html>, Vec<FetchError>) {
@@ -638,7 +631,7 @@ async fn fetch_all_with_errors_cached(
         }
     }
 
-    let result = fetch_all_with_errors(client, urls, progress_fn).await;
+    let result = fetch_all_with_errors(client, urls, concurrency, progress_fn).await;
 
     if let Some(name) = checkpoint {
         let _ = Cache::save(name, urls, &result.0).await;
