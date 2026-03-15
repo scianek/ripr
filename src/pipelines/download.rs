@@ -1,5 +1,6 @@
 use crate::downloader::Downloader;
 use crate::error::Result;
+use crate::filename::resolve_collisions;
 use crate::progress::Progress;
 use crate::{client::Client, filename::filename_from_url};
 use futures::stream::{self, StreamExt};
@@ -92,12 +93,19 @@ impl ConfiguredDownloadPipeline {
         let completed = Arc::new(AtomicUsize::new(0));
         let progress_callback = self.progress_callback.map(Arc::new);
 
-        stream::iter(self.urls)
+        let filenames = resolve_collisions(
+            self.urls
+                .iter()
+                .enumerate()
+                .map(|(idx, url)| naming_fn(idx, url))
+                .collect(),
+        );
+
+        stream::iter(self.urls.into_iter().zip(filenames))
             .enumerate()
-            .map(|(idx, url)| {
+            .map(|(_, (url, filename))| {
                 let downloader = Downloader::new(self.client.clone());
                 let dir = self.dir.clone();
-                let filename = naming_fn(idx, &url);
                 let completed = completed.clone();
                 let progress_callback = progress_callback.clone();
 
@@ -105,7 +113,6 @@ impl ConfiguredDownloadPipeline {
                     let path = dir.join(filename);
                     let result = downloader.download(&url, path).await;
 
-                    // Update progress
                     let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(callback) = progress_callback.as_ref() {
                         callback(&Progress::new(current, total));
