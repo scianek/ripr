@@ -17,81 +17,135 @@
 //! SelectionChain::new()
 //!     .select_all(".post")?      // Find all posts (creates branches)
 //!     .select_one("img")?        // For EACH post, find first image
-//!
-//! // This is different from a flat selector like ".post img:first-child"
-//! // which only gets the first image from the first post
 //! ```
 
 use crate::error::{Error, Result};
+use std::marker::PhantomData;
 
-/// A single level in a selection chain
+/// Typestate marker: chain has no levels yet.
+pub struct Empty;
+
+/// Typestate marker: chain has at least one level.
+pub struct NonEmpty;
+
+/// A single level in a selection chain.
 #[derive(Debug, Clone)]
 pub(crate) enum SelectMode {
     First(scraper::Selector),
     All(scraper::Selector),
 }
 
-/// A selection chain defines a sequence of selection operations to apply to elements
+/// A selection chain defines a sequence of selection operations to apply to elements.
 #[derive(Debug, Clone)]
-pub struct SelectionChain {
+pub struct SelectionChain<State = Empty> {
     pub(crate) levels: Vec<SelectMode>,
+    _state: PhantomData<State>,
 }
 
-impl SelectionChain {
-    /// Create a new empty selection chain
+impl SelectionChain<Empty> {
+    /// Create a new empty selection chain.
+    ///
+    /// Call [`select_one`] or [`select_all`] to add at least one level before use.
+    ///
+    /// [`select_one`]: SelectionChain::select_one
+    /// [`select_all`]: SelectionChain::select_all
     pub fn new() -> Self {
-        Self { levels: vec![] }
+        Self {
+            levels: vec![],
+            _state: PhantomData,
+        }
     }
 
-    /// Add a level that selects only the first matching element.
+    /// Add a level that selects the first matching element.
     ///
-    /// When applied, this narrows the selection to only the first element
-    /// that matches the CSS selector from each element in the current set.
-    ///
-    /// # Arguments
-    /// * `selector` - A CSS selector string (e.g., "img", ".post", "#main")
+    /// Transitions the chain from [`Empty`] to [`NonEmpty`], making it
+    /// ready for use with [`Element::select_chain`].
     ///
     /// # Errors
-    /// Returns an error if the CSS selector is invalid
     ///
-    /// # Example
-    /// ```ignore
-    /// // Get the first paragraph from the main element
-    /// chain.select_one("#main")?.select_one("p")?
-    /// ```
-    pub fn select_one(mut self, selector: &str) -> Result<Self> {
+    /// Returns [`Error::InvalidSelector`] if the CSS selector is invalid.
+    pub fn select_one(self, selector: &str) -> Result<SelectionChain<NonEmpty>> {
         let sel = scraper::Selector::parse(selector)
             .map_err(|e| Error::InvalidSelector(format!("{:?}", e)))?;
-        self.levels.push(SelectMode::First(sel));
-        Ok(self)
+        Ok(SelectionChain {
+            levels: {
+                let mut l = self.levels;
+                l.push(SelectMode::First(sel));
+                l
+            },
+            _state: PhantomData,
+        })
     }
 
     /// Add a level that selects all matching elements.
     ///
-    /// When applied, this creates a branch point - the chain will continue
-    /// independently for each matched element. This is useful for selecting
-    /// multiple containers and then extracting data from each.
-    ///
-    /// # Arguments
-    /// * `selector` - A CSS selector string (e.g., "img", ".post", "#main")
+    /// Transitions the chain from [`Empty`] to [`NonEmpty`], making it
+    /// ready for use with [`Element::select_chain`]. This level acts as a
+    /// branch point - subsequent levels are applied independently to each
+    /// matched element.
     ///
     /// # Errors
-    /// Returns an error if the CSS selector is invalid
     ///
-    /// # Example
-    /// ```ignore
-    /// // Get the first image from each post (not just the first post)
-    /// chain.select_all(".post")?.select_one("img")?
-    /// ```
-    pub fn select_all(mut self, selector: &str) -> Result<Self> {
+    /// Returns [`Error::InvalidSelector`] if the CSS selector is invalid.
+    pub fn select_all(self, selector: &str) -> Result<SelectionChain<NonEmpty>> {
         let sel = scraper::Selector::parse(selector)
             .map_err(|e| Error::InvalidSelector(format!("{:?}", e)))?;
-        self.levels.push(SelectMode::All(sel));
-        Ok(self)
+        Ok(SelectionChain {
+            levels: {
+                let mut l = self.levels;
+                l.push(SelectMode::All(sel));
+                l
+            },
+            _state: PhantomData,
+        })
     }
 }
 
-impl Default for SelectionChain {
+impl SelectionChain<NonEmpty> {
+    /// Add a level that selects the first matching element.
+    ///
+    /// Narrows the current set - for each element in the set, only the
+    /// first child matching the selector is kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidSelector`] if the CSS selector is invalid.
+    pub fn select_one(self, selector: &str) -> Result<SelectionChain<NonEmpty>> {
+        let sel = scraper::Selector::parse(selector)
+            .map_err(|e| Error::InvalidSelector(format!("{:?}", e)))?;
+        Ok(SelectionChain {
+            levels: {
+                let mut l = self.levels;
+                l.push(SelectMode::First(sel));
+                l
+            },
+            _state: PhantomData,
+        })
+    }
+
+    /// Add a level that selects all matching elements.
+    ///
+    /// Expands the current set - for each element in the set, all matching
+    /// children are collected. Acts as a branch point for subsequent levels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidSelector`] if the CSS selector is invalid.
+    pub fn select_all(self, selector: &str) -> Result<SelectionChain<NonEmpty>> {
+        let sel = scraper::Selector::parse(selector)
+            .map_err(|e| Error::InvalidSelector(format!("{:?}", e)))?;
+        Ok(SelectionChain {
+            levels: {
+                let mut l = self.levels;
+                l.push(SelectMode::All(sel));
+                l
+            },
+            _state: PhantomData,
+        })
+    }
+}
+
+impl Default for SelectionChain<Empty> {
     fn default() -> Self {
         Self::new()
     }

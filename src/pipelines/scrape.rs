@@ -6,7 +6,7 @@ use crate::client::{Client, ClientBuilder};
 use crate::element::Element;
 use crate::error::{Error, Result};
 use crate::html::Html;
-use crate::selection_chain::SelectionChain;
+use crate::selection_chain::{NonEmpty, SelectionChain};
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,7 +198,7 @@ impl Paginated {
 pub struct SelectorPipeline {
     urls: Vec<String>,
     client: Client,
-    selection_chain: SelectionChain,
+    selection_chain: SelectionChain<NonEmpty>,
     checkpoint: Option<String>,
     concurrency: usize,
 }
@@ -302,7 +302,7 @@ enum Extractor {
 pub struct ExtractorPipeline {
     urls: Vec<String>,
     client: Client,
-    selection_chain: SelectionChain,
+    selection_chain: SelectionChain<NonEmpty>,
     extractor: Extractor,
     progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
     checkpoint: Option<String>,
@@ -362,7 +362,11 @@ impl ExtractorPipeline {
     }
 }
 
-fn extract_all(htmls: Vec<Html>, extractor: &Extractor, chain: &SelectionChain) -> Vec<String> {
+fn extract_all(
+    htmls: Vec<Html>,
+    extractor: &Extractor,
+    chain: &SelectionChain<NonEmpty>,
+) -> Vec<String> {
     let mut results = Vec::new();
     for html in htmls {
         let elements = html.select_chain(chain);
@@ -383,7 +387,7 @@ fn extract_all(htmls: Vec<Html>, extractor: &Extractor, chain: &SelectionChain) 
 pub struct CustomExtractionPipeline<T: Extract> {
     urls: Vec<String>,
     client: Client,
-    selection_chain: SelectionChain,
+    selection_chain: SelectionChain<NonEmpty>,
     progress_callback: Option<Box<dyn Fn(&Progress) + Send + Sync>>,
     checkpoint: Option<String>,
     concurrency: usize,
@@ -440,7 +444,7 @@ impl<T: Extract> CustomExtractionPipeline<T> {
     }
 }
 
-fn extract_all_custom<T: Extract>(htmls: Vec<Html>, chain: &SelectionChain) -> Vec<T> {
+fn extract_all_custom<T: Extract>(htmls: Vec<Html>, chain: &SelectionChain<NonEmpty>) -> Vec<T> {
     let mut results = Vec::new();
     for html in htmls {
         let selections = html.select_chain(chain);
